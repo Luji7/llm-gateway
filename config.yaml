@@ -1,0 +1,61 @@
+server:
+  bind_addr: "0.0.0.0:8080"
+
+downstream:
+  base_url: "https://api.moonshot.cn/v1"
+  api_key: "sk-xxxx"
+  connect_timeout_ms: 5000
+  read_timeout_ms: 60000
+  pool_max_idle_per_host: 64
+
+models:
+  model_map:
+    kimi-k2.5: kimi-k2.5
+    claude-opus-4-5-20251101: kimi-k2.5
+    claude-opus-4-1-20250805: kimi-k2.5
+    claude-opus-4-20250514: kimi-k2.5
+    claude-sonnet-4-5-20250929: kimi-k2.5
+    claude-sonnet-4-20250514: kimi-k2.5
+    claude-haiku-4-5-20251001: kimi-k2.5
+    claude-3-5-haiku-20241022: kimi-k2.5
+    kimi-k2.5: kimi-k2.5
+  display_map:
+    claude-opus-4-5-20251101: "claude-opus-4-5"
+    claude-opus-4-1-20250805: "claude-opus-4-1"
+    claude-opus-4-20250514: "claude-opus-4"
+    claude-sonnet-4-5-20250929: "claude-sonnet-4-5"
+    claude-sonnet-4-20250514: "claude-sonnet-4"
+    claude-haiku-4-5-20251001: "claude-haiku-4-5"
+    claude-3-5-haiku-20241022: "claude-3-5-haiku"
+  allowlist: []
+  blocklist: []
+  thinking_map:
+    4000: "medium"
+    8000: "high"
+  output_strict: true
+  allow_images: true
+  document_policy: "reject"
+  models_override: null
+
+limits:
+  max_inflight: 512
+
+observability:
+  service_name: "llm-gateway"
+  dump_downstream: false
+  logging:
+    level: "info"
+    format: "text" # "json" 将回退为 text（未启用 json feature）
+    stdout: true
+    file: "./logs/llm-gateway.log"
+  otlp_grpc:
+    endpoint: "http://localhost:4317"
+    timeout_ms: 3000
+  otlp_http:
+    base_url: "https://cloud.langfuse.com/api/public/otel"
+    public_key: "pk-xxxx"
+    secret_key: "sk-xxxx"
+    timeout_ms: 5000
+  exporters:
+    tracing: "langfuse_http" # or "otlp_grpc"
+    metrics: "langfuse_http" # or "otlp_grpc"
