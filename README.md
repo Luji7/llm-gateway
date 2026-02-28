@@ -1,6 +1,8 @@
-# AI Gateway (Anthropic -> OpenAI Compat)
+# AI Gateway (Anthropic Passthrough / OpenAI Compat)
 
-Rust 实现的轻量级 LLM 网关代理服务，接收 Anthropic Messages API 格式请求，转换为 OpenAI Chat Completions 兼容格式并转发下游。
+Rust 实现的轻量级 LLM 网关代理服务，接收 Anthropic Messages API 格式请求。支持两种转发模式：
+- `passthrough`：Anthropic 原格式直转发（默认）
+- `translate`：Anthropic → OpenAI Chat Completions 兼容格式转换转发
 
 ## 运行
 
@@ -154,9 +156,14 @@ CONFIG_PATH=./config.yaml cargo run
 server:
   bind_addr: "0.0.0.0:8080"
 
+anthropic:
+  forward_mode: "passthrough"
+
 downstream:
   base_url: "https://api.moonshot.cn/v1"
-  api_key: "sk-xxx"
+  api_key: null # passthrough 时可为空
+  anthropic_version: null
+  anthropic_beta: null
   connect_timeout_ms: 5000
   read_timeout_ms: 60000
   pool_max_idle_per_host: 64
@@ -182,6 +189,11 @@ limits:
 observability:
   service_name: "llm-gateway"
   dump_downstream: false
+  audit_log:
+    enabled: false
+    path: "./logs/upstream_audit.jsonl"
+    max_body_bytes: 1048576
+    max_file_bytes: 1048576
   logging:
     level: "info"
     format: "text" # "json" 将回退为 text（未启用 json feature）
@@ -199,6 +211,42 @@ observability:
     tracing: "langfuse_http" # or "otlp_grpc"
     metrics: "langfuse_http" # or "otlp_grpc"
 ```
+
+## 配置对比（passthrough vs translate）
+
+### 1) Passthrough（默认，直连 Anthropic）
+
+```yaml
+anthropic:
+  forward_mode: "passthrough"
+
+downstream:
+  base_url: "https://api.anthropic.com"
+  api_key: null # passthrough 时不会注入到请求头
+  anthropic_version: null # passthrough 时不会注入到请求头
+  anthropic_beta: null # passthrough 时不会注入到请求头
+```
+
+说明：
+- 请求与响应均为 Anthropic 原格式。
+- SSE 流式响应原样透传。
+- passthrough 仅改动下游 URL，其余头部与请求体保持不变（除 `host`、`content-length` 会自动调整）。
+- 网关不会在 passthrough 模式下补写 `x-api-key` / `anthropic-*` 头部。
+
+### 2) Translate（Anthropic → OpenAI 兼容）
+
+```yaml
+anthropic:
+  forward_mode: "translate"
+
+downstream:
+  base_url: "https://api.openai.com"
+  api_key: "sk-xxxx"
+```
+
+说明：
+- 入参为 Anthropic 格式，转换成 OpenAI Chat Completions 请求。
+- 出参由 OpenAI 响应转换回 Anthropic 格式。
 
 ## Langfuse OTLP（HTTP）
 

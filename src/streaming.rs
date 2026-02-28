@@ -1,10 +1,11 @@
 use axum::{
     body::Bytes,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -13,6 +14,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::trace::Span;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::audit_log::{AuditContext, headers_to_map, now_ms};
 use crate::error::{map_downstream_error, AppError};
 use crate::models::{AnthropicUsage, OpenAIRequest, OpenAIStreamChunk};
 use crate::state::{AppState, InflightGuard};
@@ -46,6 +48,7 @@ pub async fn stream_messages(
     request_id: String,
     start: Instant,
     span: opentelemetry::global::BoxedSpan,
+    audit_ctx: Option<AuditContext>,
 ) -> Result<Response, AppError> {
     let _ = request_id;
     let span = span;
@@ -56,6 +59,29 @@ pub async fn stream_messages(
             "downstream request: {}",
             body
         );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!(
+                "Bearer {}",
+                state.config.downstream.api_key.as_deref().unwrap_or_default()
+            ))
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("[invalid]")),
+        );
+        headers.insert(
+            CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        tracing::info!(
+            request_id = %request_id,
+            "downstream request headers: {}",
+            headers_for_trace(&headers)
+        );
+        tracing::info!(
+            request_id = %request_id,
+            "downstream request url: {}",
+            state.config.chat_completions_url()
+        );
     }
     let resp = state
         .stream_client
@@ -63,13 +89,23 @@ pub async fn stream_messages(
         .header(CONTENT_TYPE, "application/json")
         .header(
             AUTHORIZATION,
-            format!("Bearer {}", state.config.downstream.api_key),
+            format!(
+                "Bearer {}",
+                state.config.downstream.api_key.as_deref().unwrap_or_default()
+            ),
         )
         .json(&openai_req)
         .send()
         .await
         .map_err(|e| AppError::api_error(format!("downstream request failed: {}", e)))?;
 
+    if state.config.observability.dump_downstream {
+        tracing::info!(
+            request_id = %request_id,
+            "downstream response headers: {}",
+            headers_for_trace(resp.headers())
+        );
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -77,11 +113,20 @@ pub async fn stream_messages(
         return Err(mapped);
     }
 
+    let content_type = resp.headers().get(CONTENT_TYPE).cloned();
     let mut stream = resp.bytes_stream();
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::convert::Infallible>>(64);
 
     let metrics = state.metrics.clone();
     let dump_downstream = state.config.observability.dump_downstream;
+    let audit_logger = state.audit_logger.clone();
+    let response_headers = {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(ct) = content_type.clone() {
+            headers.insert(CONTENT_TYPE, ct);
+        }
+        headers
+    };
     let model = openai_req.model.clone();
     tokio::spawn(async move {
         let _guard = guard;
@@ -110,6 +155,19 @@ pub async fn stream_messages(
                     metrics.errors.add(1, &[KeyValue::new("type", error_type)]);
                     span.set_attribute(KeyValue::new("error.type", err.error_type.clone()));
                     let _ = tx.send(Ok(Bytes::from(error_event(err)))).await;
+                    if let Some(logger) = audit_logger.clone() {
+                        if let Some(ctx) = audit_ctx.clone() {
+                            let record = ctx.finish(
+                                StatusCode::OK.as_u16(),
+                                headers_to_map(&response_headers),
+                                Value::Null,
+                                true,
+                                false,
+                                now_ms(),
+                            );
+                            logger.push(record).await;
+                        }
+                    }
                     span.end();
                     return;
                 }
@@ -155,6 +213,19 @@ pub async fn stream_messages(
                                 response_trace
                             );
                         }
+                        if let Some(logger) = audit_logger.clone() {
+                            if let Some(ctx) = audit_ctx.clone() {
+                                let record = ctx.finish(
+                                    StatusCode::OK.as_u16(),
+                                    headers_to_map(&response_headers),
+                                    Value::Null,
+                                    true,
+                                    false,
+                                    now_ms(),
+                                );
+                                logger.push(record).await;
+                            }
+                        }
                         span.end();
                         return;
                     }
@@ -195,6 +266,23 @@ pub async fn stream_messages(
                         "downstream.response",
                         response_trace.clone(),
                     ));
+                    if let Some(logger) = audit_logger.clone() {
+                        if let Some(ctx) = audit_ctx.clone() {
+                            let (body_value, parse_error) = match stream_upstream_response(&state) {
+                                Some(body) => parse_body_value(body.as_bytes()),
+                                None => (Value::Null, true),
+                            };
+                            let record = ctx.finish(
+                                StatusCode::OK.as_u16(),
+                                headers_to_map(&response_headers),
+                                body_value,
+                                parse_error,
+                                false,
+                                now_ms(),
+                            );
+                            logger.push(record).await;
+                        }
+                    }
                     span.end();
                     return;
                 }
@@ -244,6 +332,19 @@ pub async fn stream_messages(
                         "downstream.response",
                         response_trace.clone(),
                     ));
+                    if let Some(logger) = audit_logger.clone() {
+                        if let Some(ctx) = audit_ctx.clone() {
+                            let record = ctx.finish(
+                                StatusCode::OK.as_u16(),
+                                headers_to_map(&response_headers),
+                                Value::Null,
+                                true,
+                                false,
+                                now_ms(),
+                            );
+                            logger.push(record).await;
+                        }
+                    }
                     span.end();
                     return;
                 }
@@ -251,6 +352,174 @@ pub async fn stream_messages(
         }
         let _ = model;
         let _ = request_id;
+    });
+
+    let body_stream = ReceiverStream::new(rx);
+    let body = axum::body::Body::from_stream(body_stream);
+    let mut builder = Response::builder().status(StatusCode::OK);
+    if let Some(ct) = content_type {
+        builder = builder.header(CONTENT_TYPE, ct);
+    }
+    Ok(builder.body(body).unwrap_or_else(|_| {
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }))
+}
+
+pub async fn stream_anthropic_passthrough(
+    state: AppState,
+    payload: Value,
+    forward_headers: axum::http::HeaderMap,
+    model: String,
+    audit_ctx: Option<AuditContext>,
+    guard: InflightGuard,
+    request_id: String,
+    start: Instant,
+    span: opentelemetry::global::BoxedSpan,
+) -> Result<Response, AppError> {
+    if state.config.observability.dump_downstream {
+        let body = serde_json::to_string(&payload).unwrap_or_else(|_| "[unserializable]".to_string());
+        tracing::info!(
+            request_id = %request_id,
+            "downstream request: {}",
+            body
+        );
+        tracing::info!(
+            request_id = %request_id,
+            "downstream request headers: {}",
+            headers_for_trace(&forward_headers)
+        );
+        tracing::info!(
+            request_id = %request_id,
+            "downstream request url: {}",
+            state.config.anthropic_messages_url()
+        );
+    }
+
+    let request = state
+        .stream_client
+        .post(state.config.anthropic_messages_url())
+        .headers(forward_headers);
+
+    let resp = request
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| AppError::api_error(format!("downstream request failed: {}", e)))?;
+
+    if state.config.observability.dump_downstream {
+        tracing::info!(
+            request_id = %request_id,
+            "downstream response headers: {}",
+            headers_for_trace(resp.headers())
+        );
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let raw_body = resp.bytes().await.unwrap_or_default();
+        if state.config.observability.dump_downstream {
+            if let Ok(text) = std::str::from_utf8(&raw_body) {
+                tracing::info!(
+                    request_id = %request_id,
+                    "downstream response: {}",
+                    text
+                );
+            }
+        }
+        if let Some((logger, ctx)) = state.audit_logger.clone().zip(audit_ctx) {
+            let (body_value, parse_error) = parse_body_value(&raw_body);
+            let record = ctx.finish(
+                status.as_u16(),
+                headers_to_map(&headers),
+                body_value,
+                parse_error,
+                false,
+                now_ms(),
+            );
+            logger.push(record).await;
+        }
+        return Ok(response_from_bytes(status, headers.get(CONTENT_TYPE), raw_body));
+    }
+
+    let response_headers = match resp.headers().get(CONTENT_TYPE) {
+        Some(ct) => {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(CONTENT_TYPE, ct.clone());
+            headers
+        }
+        None => axum::http::HeaderMap::new(),
+    };
+    let mut stream = resp.bytes_stream();
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::convert::Infallible>>(64);
+
+    let metrics = state.metrics.clone();
+    let dump_downstream = state.config.observability.dump_downstream;
+    let audit_logger = state.audit_logger.clone();
+    let max_body_bytes = state.config.observability.audit_log.max_body_bytes;
+    tokio::spawn(async move {
+        let _guard = guard;
+        let mut span = span;
+        let mut audit_buf: Vec<u8> = Vec::new();
+        let mut audit_truncated = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if dump_downstream {
+                        if let Ok(text) = std::str::from_utf8(&bytes) {
+                            tracing::info!(
+                                request_id = %request_id,
+                                "downstream stream chunk: {}",
+                                text
+                            );
+                        }
+                    }
+                    if !audit_truncated && audit_buf.len() + bytes.len() <= max_body_bytes {
+                        audit_buf.extend_from_slice(&bytes);
+                    } else {
+                        audit_truncated = true;
+                    }
+                    if tx.send(Ok(bytes)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let err = AppError::api_error(format!("stream error: {}", err));
+                    let error_type = err.error_type.clone();
+                    metrics.errors.add(1, &[KeyValue::new("type", error_type)]);
+                    span.set_attribute(KeyValue::new("error.type", err.error_type.clone()));
+                    break;
+                }
+            }
+        }
+        metrics.latency_ms.record(
+            start.elapsed().as_millis() as f64,
+            &[KeyValue::new("stream", "true")],
+        );
+        tracing::info!(
+            request_id = %request_id,
+            model = %model,
+            latency_ms = start.elapsed().as_millis(),
+            status = 200,
+            "request completed"
+        );
+        if let Some(logger) = audit_logger.clone() {
+            if let Some(ctx) = audit_ctx.clone() {
+                let (body_value, parse_error) = parse_body_value(&audit_buf);
+                let record = ctx.finish(
+                    StatusCode::OK.as_u16(),
+                    headers_to_map(&response_headers),
+                    body_value,
+                    parse_error,
+                    audit_truncated,
+                    now_ms(),
+                );
+                logger.push(record).await;
+            }
+        }
+        span.end();
     });
 
     let body_stream = ReceiverStream::new(rx);
@@ -673,6 +942,36 @@ fn serialize_json_for_trace(value: &serde_json::Value) -> String {
         Ok(s) => s,
         Err(_) => "[unserializable]".to_string(),
     }
+}
+
+fn headers_for_trace(headers: &axum::http::HeaderMap) -> String {
+    let mut out = serde_json::Map::new();
+    for (name, value) in headers.iter() {
+        let value = value.to_str().unwrap_or("[invalid]");
+        out.insert(name.to_string(), serde_json::Value::String(value.to_string()));
+    }
+    serde_json::Value::Object(out).to_string()
+}
+
+fn parse_body_value(bytes: &[u8]) -> (Value, bool) {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) => (value, false),
+        Err(_) => (Value::Null, true),
+    }
+}
+
+fn response_from_bytes(
+    status: StatusCode,
+    content_type: Option<&HeaderValue>,
+    body: Bytes,
+) -> Response {
+    let mut builder = Response::builder().status(status);
+    if let Some(ct) = content_type {
+        builder = builder.header(CONTENT_TYPE, ct);
+    }
+    builder
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| Response::builder().status(status).body(axum::body::Body::empty()).unwrap())
 }
 
 

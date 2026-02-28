@@ -13,6 +13,8 @@ pub struct AnthropicRequest {
     #[serde(default)]
     pub top_p: Option<f32>,
     #[serde(default)]
+    pub top_k: Option<u32>,
+    #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
     #[serde(default)]
     pub stream: Option<bool>,

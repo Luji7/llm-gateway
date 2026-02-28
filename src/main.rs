@@ -7,6 +7,7 @@ mod state;
 mod tracing_otlp;
 mod streaming;
 mod translate;
+mod audit_log;
 
 use axum::{routing::post, Router};
 use handlers::post_messages;
@@ -21,6 +22,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::Config;
 use crate::state::AppState;
+use crate::audit_log::AuditLogger;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::Arc;
@@ -179,6 +181,18 @@ async fn main() {
         inflight: std::sync::Arc::new(tokio::sync::Semaphore::new(config.limits.max_inflight)),
         inflight_count,
         metrics,
+        audit_logger: if config.observability.audit_log.enabled {
+            match config.observability.audit_log.path.as_deref() {
+                Some(path) => AuditLogger::new(
+                    path.to_string(),
+                    config.observability.audit_log.max_file_bytes,
+                )
+                .ok(),
+                None => None,
+            }
+        } else {
+            None
+        },
         _tracer_provider: tracer_provider,
     };
 

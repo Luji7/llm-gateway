@@ -9,6 +9,8 @@ use crate::models::AnthropicModel;
 pub struct Config {
     pub server: ServerConfig,
     pub downstream: DownstreamConfig,
+    #[serde(default)]
+    pub anthropic: AnthropicConfig,
     pub models: ModelsConfig,
     pub limits: LimitsConfig,
     pub observability: ObservabilityConfig,
@@ -24,13 +26,32 @@ pub struct ServerConfig {
 pub struct DownstreamConfig {
     #[serde(default = "default_openai_base_url")]
     pub base_url: String,
-    pub api_key: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub anthropic_version: Option<String>,
+    #[serde(default)]
+    pub anthropic_beta: Option<String>,
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
     #[serde(default = "default_read_timeout_ms")]
     pub read_timeout_ms: u64,
     #[serde(default = "default_pool_max_idle_per_host")]
     pub pool_max_idle_per_host: usize,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AnthropicConfig {
+    #[serde(default = "default_forward_mode")]
+    pub forward_mode: String,
+}
+
+impl Default for AnthropicConfig {
+    fn default() -> Self {
+        Self {
+            forward_mode: default_forward_mode(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -67,6 +88,8 @@ pub struct ObservabilityConfig {
     pub service_name: String,
     #[serde(default)]
     pub dump_downstream: bool,
+    #[serde(default)]
+    pub audit_log: AuditLogConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
@@ -146,6 +169,29 @@ pub struct LoggingConfig {
     pub file: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct AuditLogConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "default_audit_max_body_bytes")]
+    pub max_body_bytes: usize,
+    #[serde(default = "default_audit_max_file_bytes")]
+    pub max_file_bytes: u64,
+}
+
+impl Default for AuditLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: None,
+            max_body_bytes: default_audit_max_body_bytes(),
+            max_file_bytes: default_audit_max_file_bytes(),
+        }
+    }
+}
+
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
@@ -185,6 +231,15 @@ impl Config {
         }
     }
 
+    pub fn anthropic_messages_url(&self) -> String {
+        let base = self.downstream.base_url.trim_end_matches('/');
+        if base.ends_with("/v1") {
+            format!("{}/messages", base)
+        } else {
+            format!("{}/v1/messages", base)
+        }
+    }
+
     pub fn models_url(&self) -> String {
         let base = self.downstream.base_url.trim_end_matches('/');
         if base.ends_with("/v1") {
@@ -192,6 +247,19 @@ impl Config {
         } else {
             format!("{}/v1/models", base)
         }
+    }
+
+    pub fn anthropic_models_url(&self) -> String {
+        let base = self.downstream.base_url.trim_end_matches('/');
+        if base.ends_with("/v1") {
+            format!("{}/models", base)
+        } else {
+            format!("{}/v1/models", base)
+        }
+    }
+
+    pub fn forward_mode(&self) -> &str {
+        self.anthropic.forward_mode.as_str()
     }
 
     pub fn document_policy(&self) -> Result<DocumentPolicy, String> {
@@ -223,8 +291,47 @@ impl Config {
     }
 
     fn normalize(&mut self) -> Result<(), String> {
-        if self.downstream.api_key.trim().is_empty() {
-            return Err("downstream.api_key is required".to_string());
+        self.anthropic.forward_mode = self.anthropic.forward_mode.to_lowercase();
+        match self.anthropic.forward_mode.as_str() {
+            "passthrough" | "translate" => {}
+            other => return Err(format!("anthropic.forward_mode invalid: {}", other)),
+        }
+        if self.anthropic.forward_mode != "passthrough" {
+            match self.downstream.api_key.as_deref() {
+                Some(key) if !key.trim().is_empty() => {}
+                _ => return Err("downstream.api_key is required".to_string()),
+            }
+        }
+        if let Some(api_key) = self.downstream.api_key.as_mut() {
+            if api_key.trim().is_empty() {
+                self.downstream.api_key = None;
+            }
+        }
+        if let Some(version) = self.downstream.anthropic_version.as_mut() {
+            if version.trim().is_empty() {
+                self.downstream.anthropic_version = None;
+            }
+        }
+        if let Some(beta) = self.downstream.anthropic_beta.as_mut() {
+            if beta.trim().is_empty() {
+                self.downstream.anthropic_beta = None;
+            }
+        }
+        if self.observability.audit_log.enabled {
+            if self.observability.audit_log.max_body_bytes == 0 {
+                return Err("audit_log.max_body_bytes must be > 0".to_string());
+            }
+            if self.observability.audit_log.max_file_bytes == 0 {
+                return Err("audit_log.max_file_bytes must be > 0".to_string());
+            }
+            match self.observability.audit_log.path.as_deref() {
+                Some(path) if !path.trim().is_empty() => {}
+                _ => {
+                    return Err(
+                        "audit_log.path is required when dump_downstream=true".to_string()
+                    )
+                }
+            }
         }
         self.observability.logging.format =
             self.observability.logging.format.to_lowercase();
@@ -331,4 +438,16 @@ fn default_document_policy() -> String {
 
 fn default_output_strict() -> bool {
     true
+}
+
+fn default_forward_mode() -> String {
+    "passthrough".to_string()
+}
+
+fn default_audit_max_body_bytes() -> usize {
+    1_048_576
+}
+
+fn default_audit_max_file_bytes() -> u64 {
+    1_048_576
 }

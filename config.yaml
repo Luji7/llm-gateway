@@ -1,9 +1,14 @@
 server:
   bind_addr: "0.0.0.0:8080"
 
+anthropic:
+  forward_mode: "passthrough"
+
 downstream:
   base_url: "https://api.moonshot.cn/v1"
-  api_key: "sk-xxxx"
+  api_key: null
+  anthropic_version: null
+  anthropic_beta: null
   connect_timeout_ms: 5000
   read_timeout_ms: 60000
   pool_max_idle_per_host: 64
@@ -43,6 +48,11 @@ limits:
 observability:
   service_name: "llm-gateway"
   dump_downstream: false
+  audit_log:
+    enabled: false
+    path: "./logs/upstream_audit.jsonl"
+    max_body_bytes: 1048576
+    max_file_bytes: 1048576
   logging:
     level: "info"
     format: "text" # "json" 将回退为 text（未启用 json feature）

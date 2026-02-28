@@ -26,3 +26,12 @@
 - ./specs/anthropic models端点消息格式.md
 
 ./specs/openai兼容格式.md 定义了openai格式的消息格式和约束
+
+## 新特性：anthropic消息转发
+
+参考 ./specs/anthropic消息格式.md 的接口格式定义，深入思考如何在当前项目中增加支持anthropic格式消息的直接转发。用户可以在配置文件中控制是直接anthropic格式请求消息转发或是anthropic格式转换openai兼容格式转发（当前项目已支持）。输出详细的方案计划，不要直接修改。
+
+方案计划修改建议：
+- 直接转发作为默认配置
+
+参考 ./specs/workspace/0004-passthrough-plan.md 的方案计划文档，考虑详细的实现步骤计划，并开始实施。

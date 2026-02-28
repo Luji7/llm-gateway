@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::audit_log::AuditLogger;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::metrics::Metrics;
@@ -11,6 +12,7 @@ pub struct AppState {
     pub inflight: Arc<Semaphore>,
     pub inflight_count: Arc<AtomicU64>,
     pub metrics: Metrics,
+    pub audit_logger: Option<AuditLogger>,
     pub _tracer_provider: opentelemetry_sdk::trace::SdkTracerProvider,
 }
 
